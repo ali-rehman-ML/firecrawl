@@ -13,6 +13,7 @@ import { nuqRedis } from "./redis";
 const nuqPool = new Pool({
   connectionString: config.NUQ_DATABASE_URL, // may be a pgbouncer transaction pooler URL
   application_name: "nuq",
+  max: config.NUQ_POOL_MAX,
 });
 
 nuqPool.on("error", err =>

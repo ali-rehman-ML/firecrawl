@@ -4,6 +4,10 @@ import { existsSync } from "fs";
 import * as net from "net";
 import { basename, join } from "path";
 import { HTML_TO_MARKDOWN_PATH } from "./natives";
+import {
+  selectHarnessServices,
+  type HarnessService,
+} from "./lib/harness-services";
 
 const childProcesses = new Set<ChildProcess>();
 const stopping = new WeakSet<ChildProcess>(); // processes we're intentionally stopping
@@ -825,92 +829,115 @@ async function startServices(command?: string[]): Promise<Services> {
   // Setup FoundationDB container if the FDB queue backend is enabled
   const fdb = await setupFdb();
 
+  // Resolved after the container setup above, which is what populates
+  // config.NUQ_RABBITMQ_URL when the harness manages the broker itself.
+  const { enabled, skipped } = selectHarnessServices({
+    requested: config.HARNESS_SERVICES,
+    nuqBackend: config.NUQ_BACKEND,
+    rabbitMqUrl: config.NUQ_RABBITMQ_URL,
+    useDbAuthentication: config.USE_DB_AUTHENTICATION,
+  });
+
   logger.section("Starting services");
 
-  const api = execForward(
-    "api",
-    process.argv[2] === "--start-docker"
-      ? "node dist/src/index.js"
-      : "pnpm server:production:nobuild",
-    {
-      NUQ_REDUCE_NOISE: "true",
-      NUQ_POD_NAME: "api",
-    },
-  );
+  for (const { service, reason } of skipped) {
+    logger.warn(`Not starting ${service}: ${reason}`);
+  }
 
-  const worker = execForward(
-    "worker",
-    process.argv[2] === "--start-docker"
-      ? "node dist/src/services/queue-worker.js"
-      : "pnpm worker:production",
-    {
-      NUQ_REDUCE_NOISE: "true",
-      NUQ_POD_NAME: "worker",
-      WORKER_PORT: String(WORKER_PORT),
-    },
-  );
+  const isDocker = process.argv[2] === "--start-docker";
+  const runs = (service: HarnessService) => enabled.has(service);
 
-  const extractWorker = execForward(
-    "extract-worker",
-    process.argv[2] === "--start-docker"
-      ? "node dist/src/services/extract-worker.js"
-      : "pnpm extract-worker:production",
-    {
-      NUQ_REDUCE_NOISE: "true",
-      NUQ_POD_NAME: "extract-worker",
-      EXTRACT_WORKER_PORT: String(EXTRACT_WORKER_PORT),
-    },
-  );
+  const api = runs("api")
+    ? execForward(
+        "api",
+        isDocker ? "node dist/src/index.js" : "pnpm server:production:nobuild",
+        {
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "api",
+        },
+      )
+    : undefined;
 
-  const nuqWorkers = Array.from({ length: NUQ_WORKER_COUNT }, (_, i) =>
-    execForward(
-      `${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}-${i}`,
-      process.argv[2] === "--start-docker"
-        ? `node dist/src/services/worker/${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}.js`
-        : `pnpm ${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}:production`,
-      {
-        NUQ_WORKER_PORT: String(NUQ_WORKER_START_PORT + i),
-        NUQ_REDUCE_NOISE: "true",
-        NUQ_POD_NAME: `${config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker"}-${i}`,
-      },
-    ),
-  );
+  const worker = runs("worker")
+    ? execForward(
+        "worker",
+        isDocker
+          ? "node dist/src/services/queue-worker.js"
+          : "pnpm worker:production",
+        {
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "worker",
+          WORKER_PORT: String(WORKER_PORT),
+        },
+      )
+    : undefined;
 
-  const nuqPrefetchWorker =
-    config.NUQ_BACKEND === "fdb"
-      ? undefined
-      : execForward(
-          "nuq-prefetch-worker",
-          process.argv[2] === "--start-docker"
-            ? "node dist/src/services/worker/nuq-prefetch-worker.js"
-            : "pnpm nuq-prefetch-worker:production",
+  const extractWorker = runs("extract-worker")
+    ? execForward(
+        "extract-worker",
+        isDocker
+          ? "node dist/src/services/extract-worker.js"
+          : "pnpm extract-worker:production",
+        {
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "extract-worker",
+          EXTRACT_WORKER_PORT: String(EXTRACT_WORKER_PORT),
+        },
+      )
+    : undefined;
+
+  const nuqWorkerName =
+    config.NUQ_BACKEND === "fdb" ? "nuq-fdb-worker" : "nuq-worker";
+
+  const nuqWorkers = runs("nuq-worker")
+    ? Array.from({ length: NUQ_WORKER_COUNT }, (_, i) =>
+        execForward(
+          `${nuqWorkerName}-${i}`,
+          isDocker
+            ? `node dist/src/services/worker/${nuqWorkerName}.js`
+            : `pnpm ${nuqWorkerName}:production`,
           {
-            NUQ_PREFETCH_WORKER_PORT: String(NUQ_PREFETCH_WORKER_PORT),
+            NUQ_WORKER_PORT: String(NUQ_WORKER_START_PORT + i),
             NUQ_REDUCE_NOISE: "true",
-            NUQ_POD_NAME: "nuq-prefetch-worker-0",
-            NUQ_PREFETCH_REPLICAS: String(1),
+            NUQ_POD_NAME: `${nuqWorkerName}-${i}`,
           },
-        );
+        ),
+      )
+    : [];
 
-  const nuqReconcilerWorker =
-    config.NUQ_BACKEND === "fdb"
-      ? undefined
-      : execForward(
-          "nuq-reconciler",
-          process.argv[2] === "--start-docker"
-            ? "node dist/src/services/worker/nuq-reconciler-worker.js"
-            : "pnpm nuq-reconciler-worker:production",
-          {
-            NUQ_RECONCILER_WORKER_PORT: String(NUQ_RECONCILER_WORKER_PORT),
-            NUQ_REDUCE_NOISE: "true",
-            NUQ_POD_NAME: "nuq-reconciler-worker-0",
-          },
-        );
+  const nuqPrefetchWorker = runs("nuq-prefetch-worker")
+    ? execForward(
+        "nuq-prefetch-worker",
+        isDocker
+          ? "node dist/src/services/worker/nuq-prefetch-worker.js"
+          : "pnpm nuq-prefetch-worker:production",
+        {
+          NUQ_PREFETCH_WORKER_PORT: String(NUQ_PREFETCH_WORKER_PORT),
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "nuq-prefetch-worker-0",
+          NUQ_PREFETCH_REPLICAS: String(1),
+        },
+      )
+    : undefined;
 
-  const indexWorker = config.USE_DB_AUTHENTICATION
+  const nuqReconcilerWorker = runs("nuq-reconciler-worker")
+    ? execForward(
+        "nuq-reconciler",
+        isDocker
+          ? "node dist/src/services/worker/nuq-reconciler-worker.js"
+          : "pnpm nuq-reconciler-worker:production",
+        {
+          NUQ_RECONCILER_WORKER_PORT: String(NUQ_RECONCILER_WORKER_PORT),
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "nuq-reconciler-worker-0",
+        },
+      )
+    : undefined;
+
+  const indexWorker = runs("index-worker")
     ? execForward(
         "index-worker",
-        process.argv[2] === "--start-docker"
+        isDocker
           ? "node dist/src/services/indexing/index-worker.js"
           : "pnpm index-worker:production",
         {
@@ -922,6 +949,7 @@ async function startServices(command?: string[]): Promise<Services> {
 
   // tests hammer the API instantly, so we need to ensure it's running before launching tests
   if (
+    api &&
     command &&
     Array.isArray(command) &&
     command[0] === "pnpm" &&
@@ -1030,9 +1058,11 @@ async function runDevMode(): Promise<void> {
         restartSignal = new AbortController();
 
         try {
-          await waitForPort(Number(PORT), "localhost", {
-            signal: restartSignal?.signal,
-          });
+          if (currentServices.api) {
+            await waitForPort(Number(PORT), "localhost", {
+              signal: restartSignal?.signal,
+            });
+          }
         } catch (e) {
           if (e?.name !== "AbortError") throw e;
           if (shuttingDown) return;
@@ -1104,8 +1134,10 @@ async function runDevMode(): Promise<void> {
 async function runProductionMode(command: string[]): Promise<void> {
   const services = await startServices(command);
 
-  logger.info(`Waiting for API on localhost:${PORT}`);
-  await waitForPort(Number(PORT), "localhost");
+  if (services.api) {
+    logger.info(`Waiting for API on localhost:${PORT}`);
+    await waitForPort(Number(PORT), "localhost");
+  }
 
   await waitForTermination(services);
 }

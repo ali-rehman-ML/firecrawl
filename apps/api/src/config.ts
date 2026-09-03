@@ -208,6 +208,11 @@ const configSchema = z.object({
   REDIS_RATE_LIMIT_URL: z.string().optional(),
   NUQ_DATABASE_URL: z.string().optional(),
   NUQ_DATABASE_URL_LISTEN: z.string().optional(),
+  // Max client connections the NuQ pool opens per process. `pg` defaults to
+  // 10, which is fine against a pooler but not against a small bundled
+  // Postgres: every harness process pays it, and each backend costs the
+  // database a few MB of RSS. Lower it when the whole stack shares one box.
+  NUQ_POOL_MAX: z.coerce.number().int().positive().default(10),
   NUQ_RABBITMQ_URL: z.string().optional(),
   FDB_CLUSTER_FILE: emptyStringAsUndefined(z.string()),
   NUQ_BACKEND: emptyStringAsUndefined(z.enum(["pg", "fdb"])),
@@ -302,6 +307,11 @@ const configSchema = z.object({
 
   // Harness Configuration
   HARNESS_STARTUP_TIMEOUT_MS: z.coerce.number().default(60000),
+  // Comma-separated allowlist of child processes the harness starts (see
+  // lib/harness-services.ts for the names). Unset starts everything the
+  // current configuration supports; narrowing it is how a small host runs
+  // scraping without paying for a Node heap per unused worker.
+  HARNESS_SERVICES: delimitedList(",").optional(),
 
   // Job & Lock Management
   JOB_LOCK_EXTEND_INTERVAL: z.coerce.number().default(10000),

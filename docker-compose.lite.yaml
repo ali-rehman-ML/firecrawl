@@ -1,0 +1,248 @@
+# Firecrawl, trimmed to what scraping actually needs.
+#
+# Target: a 2 vCPU / 2 GB host (AWS t3.small and equivalents). Compared to the
+# default `docker-compose.yaml` this drops three containers and five Node
+# processes:
+#
+#   - rabbitmq       only brokers /v2/extract, SIEM logging and NuQ prefetch.
+#                    Without it NuQ workers poll Postgres directly, which is
+#                    what a single-worker deployment wants anyway.
+#   - foundationdb   experimental queue backend, and its one-shot init job.
+#   - extract-worker refuses to start without RabbitMQ (needs an LLM anyway).
+#   - prefetch worker
+#                    only moves rows into RabbitMQ.
+#   - 4 of 5 NuQ workers
+#                    each processes one job at a time, so the count is the
+#                    scrape concurrency. One fits 2 GB; see NUQ_WORKER_COUNT.
+#
+# What you keep: /v2/scrape, /v2/crawl, /v2/map, /v2/batch/scrape, /v2/search,
+# JS rendering via Playwright, PDF and document parsing.
+# What you give up: /v2/extract, deep research and other LLM features (they
+# need a model provider regardless), and the FoundationDB backend.
+#
+#   docker compose -f docker-compose.lite.yaml up -d
+#
+# Copy .env.lite.example to .env first. Read the "Small hosts" section of
+# SELF_HOST.md before running this on a box you care about.
+
+name: firecrawl-lite
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "5m"
+    max-file: "2"
+    compress: "true"
+
+services:
+  # The API image must come from this revision: HARNESS_SERVICES and the
+  # "skip the workers that need RabbitMQ" behaviour below live in the harness,
+  # not in Compose. A published ghcr.io/firecrawl/firecrawl tag works only if
+  # it already contains them.
+  #
+  # Building needs Rust, Go and a full pnpm install, which does not fit in
+  # 2 GB. Build on a larger machine or in CI:
+  #
+  #   docker compose -f docker-compose.lite.yaml build api
+  #   docker save firecrawl-lite/api:local | ssh small-host docker load
+  #
+  # ...or push it to a registry and point FIRECRAWL_IMAGE at the tag. Compose
+  # builds this locally only when the tag is absent, so `up` on the small host
+  # just runs it.
+  api:
+    image: ${FIRECRAWL_IMAGE:-firecrawl-lite/api:local}
+    build: apps/api
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: ${INTERNAL_PORT:-3002}
+      ENV: local
+
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      REDIS_RATE_LIMIT_URL: ${REDIS_RATE_LIMIT_URL:-${REDIS_URL:-redis://redis:6379}}
+      PLAYWRIGHT_MICROSERVICE_URL: ${PLAYWRIGHT_MICROSERVICE_URL-http://playwright-service:3000/scrape}
+
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_HOST: ${POSTGRES_HOST:-nuq-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      USE_DB_AUTHENTICATION: ${USE_DB_AUTHENTICATION:-false}
+
+      # NUQ_RABBITMQ_URL is deliberately unset. The harness reacts by skipping
+      # the extract and prefetch workers, and NuQ falls back to polling
+      # Postgres for jobs.
+      #
+      # api    serves HTTP and enqueues jobs
+      # worker finishes crawls and runs the non-scrape queues
+      # nuq-worker
+      #        performs the scrapes (NUQ_WORKER_COUNT of them)
+      # nuq-reconciler-worker
+      #        recovers jobs stranded in the concurrency backlog
+      #
+      # nuq-reconciler-worker is left out by default: measured at ~250 MB
+      # resident, it is a quarter of this container's budget for a sweep that
+      # runs once a minute. Add it back ("...,nuq-reconciler-worker", and raise
+      # API_MEM_LIMIT) if jobs stranded in the concurrency backlog become a
+      # problem; drop to "api,nuq-worker" for a scrape-only stack that also
+      # gives up crawl completion.
+      HARNESS_SERVICES: ${HARNESS_SERVICES:-api,worker,nuq-worker}
+      NUQ_WORKER_COUNT: ${NUQ_WORKER_COUNT:-1}
+      # Postgres backends cost the database a few MB each, and every harness
+      # process opens its own pool against the same small server.
+      NUQ_POOL_MAX: ${NUQ_POOL_MAX:-4}
+      # Each in-flight extraction holds the PDF plus its parsed text in memory.
+      PDF_EXTRACTION_CONCURRENCY: ${PDF_EXTRACTION_CONCURRENCY:-1}
+      # The queue worker sheds load when host CPU/RAM exceed these fractions,
+      # and stops taking crawl-finish jobs entirely while it does (logged as
+      # "Can't accept connection due to RAM/CPU load", then "WORKER STALLED").
+      # The 0.8 defaults assume a host with spare capacity; this stack is sized
+      # to fill a small one, so they trip permanently and crawls never leave
+      # "scraping". Shedding buys little here anyway -- NUQ_WORKER_COUNT
+      # already caps concurrency at one job. Lower them if you are sharing the
+      # box with something you care about more.
+      MAX_RAM: ${MAX_RAM:-0.95}
+      MAX_CPU: ${MAX_CPU:-0.95}
+      # Sized so the heaps fit the container: HARNESS_SERVICES starts three
+      # Node processes plus the harness, and each carries ~80 MB of non-heap
+      # (binary, native modules, buffers) on top of its heap. Left at V8's
+      # default they each size off total host RAM and collectively overcommit
+      # the cgroup. Keep roughly API_MEM_LIMIT/4 - 80; raise both together if
+      # large pages hit heap OOM.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=256}
+
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_EMBEDDING_NAME: ${MODEL_EMBEDDING_NAME}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      SELF_HOSTED_WEBHOOK_URL: ${SELF_HOSTED_WEBHOOK_URL}
+      LOGGING_LEVEL: ${LOGGING_LEVEL}
+      PROXY_SERVER: ${PROXY_SERVER}
+      PROXY_USERNAME: ${PROXY_USERNAME}
+      PROXY_PASSWORD: ${PROXY_PASSWORD}
+      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT}
+      SEARXNG_ENGINES: ${SEARXNG_ENGINES}
+      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES}
+    depends_on:
+      redis:
+        condition: service_started
+      nuq-postgres:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
+    command: node dist/src/harness.js --start-docker
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    networks:
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cpus: 1.5
+    mem_limit: ${API_MEM_LIMIT:-1024m}
+    memswap_limit: ${API_MEMSWAP_LIMIT:-2048m}
+    logging: *logging
+
+  # Chromium is the single largest consumer here; budget a few hundred MB even
+  # with one page open, and confirm against `docker stats` on your workload.
+  # Comment this service out and set PLAYWRIGHT_MICROSERVICE_URL= in .env to
+  # run fetch-only scraping in roughly half the memory; you lose JS rendering,
+  # screenshots and actions.
+  playwright-service:
+    # Unmodified from upstream, so the published image is fine to pull.
+    image: ${PLAYWRIGHT_IMAGE:-ghcr.io/firecrawl/playwright-service:latest}
+    # build: apps/playwright-service-ts
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      PROXY_SERVER: ${PROXY_SERVER}
+      PROXY_USERNAME: ${PROXY_USERNAME}
+      PROXY_PASSWORD: ${PROXY_PASSWORD}
+      ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS}
+      # Images and media are discarded during conversion to markdown anyway,
+      # so blocking them buys memory and bandwidth for free. Set to False if
+      # you need screenshots to look right.
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-True}
+      # One page at a time, to match NUQ_WORKER_COUNT. Each extra concurrent
+      # page is roughly another 80-150 MB.
+      MAX_CONCURRENT_PAGES: ${MAX_CONCURRENT_PAGES:-1}
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: 1.5
+    mem_limit: ${PLAYWRIGHT_MEM_LIMIT:-448m}
+    memswap_limit: ${PLAYWRIGHT_MEMSWAP_LIMIT:-896m}
+    tmpfs:
+      # Chromium's cache lives here; capped so it cannot grow into the disk.
+      - /tmp/.cache:noexec,nosuid,size=256m
+    logging: *logging
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    networks:
+      - backend
+    # No RDB/AOF: snapshotting forks the process, and copy-on-write during the
+    # fork can briefly double Redis' footprint. Job state here is already
+    # ephemeral in the default self-hosted setup.
+    #
+    # noeviction is deliberate: this holds crawl state and concurrency
+    # bookkeeping, so silently dropping keys corrupts in-flight crawls. If you
+    # hit the limit, raise it rather than switching to an eviction policy.
+    command: >
+      redis-server --bind 0.0.0.0 --save "" --appendonly no
+      --maxmemory ${REDIS_MAXMEMORY:-48mb} --maxmemory-policy noeviction
+    mem_limit: ${REDIS_MEM_LIMIT:-64m}
+    memswap_limit: ${REDIS_MEM_LIMIT:-64m}
+    logging: *logging
+
+  nuq-postgres:
+    image: ${NUQ_POSTGRES_IMAGE:-ghcr.io/firecrawl/nuq-postgres:latest}
+    # build: apps/nuq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    # Defaults assume a machine with far more RAM. Every connection is a
+    # backend process, so the connection cap matters as much as shared_buffers:
+    # keep max_connections above (harness processes x NUQ_POOL_MAX) + headroom.
+    command: >
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-30}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-48MB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-192MB}
+      -c work_mem=${POSTGRES_WORK_MEM:-2MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-32MB}
+      -c max_worker_processes=4
+      -c max_parallel_workers=2
+      -c max_parallel_workers_per_gather=0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - backend
+    volumes:
+      # The queue survives a container replacement; the default Compose file
+      # keeps it in the container's writable layer instead. Drop this to make
+      # the queue ephemeral again.
+      - nuq-pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    mem_limit: ${POSTGRES_MEM_LIMIT:-160m}
+    memswap_limit: ${POSTGRES_MEMSWAP_LIMIT:-320m}
+    logging: *logging
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  nuq-pgdata:

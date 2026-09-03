@@ -2,6 +2,7 @@
 /node_modules/
 /dist/
 .env
+.env.lite
 *.csv
 dump.rdb
 /mongo-data
