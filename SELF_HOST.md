@@ -58,17 +58,49 @@ seven containers and, inside the API container alone, nine Node processes.
 
 The API image has to come from this revision: `HARNESS_SERVICES` and the
 harness's handling of a missing RabbitMQ are source changes, not Compose ones.
-Building it needs Rust, Go and a full pnpm install, which does not fit in 2 GB,
-so build elsewhere and move the result:
+A published `ghcr.io/firecrawl/firecrawl` tag works only if it already contains
+them.
+
+The `api` service declares both `image:` and `build:`, so a first `up` with no
+matching tag present **builds** rather than failing. That is intended when you
+are building on the host, and surprising when you meant to pull — see the two
+flows below.
+
+**Build on the host.** Expect Rust, Go and a ~730-package pnpm install: tens of
+minutes on 2 shared vCPUs. Give the box swap first; a 2 GB swapfile is enough
+to get through dependency install and Rust compilation.
 
 ```bash
-# on a machine with room to build (or in CI)
-docker compose -f docker-compose.lite.yaml build api
-docker save firecrawl-lite/api:local | ssh small-host docker load
+docker compose --env-file .env.lite -f docker-compose.lite.yaml up -d
 ```
 
-A registry works just as well; point `FIRECRAWL_IMAGE` at the tag. Then on the
-small host:
+**Build elsewhere and pull.** Better if you are deploying more than once, and
+the only option if the host cannot spare the build time:
+
+```bash
+# on a machine with room to build, or in CI
+docker compose -f docker-compose.lite.yaml build api
+docker tag firecrawl-lite/api:local <account>.dkr.ecr.<region>.amazonaws.com/firecrawl-api:lite
+docker push <account>.dkr.ecr.<region>.amazonaws.com/firecrawl-api:lite
+```
+
+Then set `FIRECRAWL_IMAGE` to that tag in `.env.lite` and pull explicitly, so a
+missing tag is an error rather than a silent build:
+
+```bash
+docker compose --env-file .env.lite -f docker-compose.lite.yaml pull
+docker compose --env-file .env.lite -f docker-compose.lite.yaml up -d --no-build
+```
+
+Match the architecture: `t3.small` is x86_64, so a build on an ARM machine needs
+`--platform linux/amd64`. A `t4g.small` is the same 2 vCPU / 2 GB on Graviton
+and removes the cross-build if you build on ARM.
+
+Only the API image is affected. `playwright-service` and `nuq-postgres` are
+unmodified upstream images and pull from ghcr.io as usual, both with amd64 and
+arm64 variants.
+
+Then, on the small host:
 
 ```bash
 cp .env.lite.example .env.lite
@@ -154,8 +186,11 @@ Two things bite on hosts this size regardless of configuration:
 - **Configure swap.** The limits sum to ~1.7 GB, leaving ~300 MB for the kernel
   and dockerd on a 2 GB host. A 2 GB swapfile turns a burst into slowness
   instead of an OOM kill.
-- **Do not build the API image here.** See above: build it elsewhere and load
-  or pull the tag.
+- **`native/Cargo.lock` is gitignored upstream.** Every from-scratch build
+  re-resolves the whole Rust dependency tree against crates.io, so a newly
+  published crate can break a build that worked yesterday — `tinyvec` is pinned
+  in `native/Cargo.toml` for exactly that reason. Tracking a lockfile is the
+  durable fix if you rebuild often.
 
 `docker stats` is the check that matters, but read it with the heap behaviour
 above in mind: the API container sitting near its limit is expected, an API

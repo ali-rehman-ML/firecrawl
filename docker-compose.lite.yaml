@@ -40,15 +40,17 @@ services:
   # not in Compose. A published ghcr.io/firecrawl/firecrawl tag works only if
   # it already contains them.
   #
-  # Building needs Rust, Go and a full pnpm install, which does not fit in
-  # 2 GB. Build on a larger machine or in CI:
+  # Because both image: and build: are set, `up` BUILDS when no matching tag is
+  # present locally rather than failing. That is what you want when building on
+  # the host (Rust + Go + a ~730-package pnpm install; tens of minutes on 2
+  # vCPUs, and give the box swap). When you meant to pull a prebuilt image,
+  # point FIRECRAWL_IMAGE at your registry tag and run:
   #
-  #   docker compose -f docker-compose.lite.yaml build api
-  #   docker save firecrawl-lite/api:local | ssh small-host docker load
+  #   docker compose --env-file .env.lite -f docker-compose.lite.yaml pull
+  #   docker compose --env-file .env.lite -f docker-compose.lite.yaml up -d --no-build
   #
-  # ...or push it to a registry and point FIRECRAWL_IMAGE at the tag. Compose
-  # builds this locally only when the tag is absent, so `up` on the small host
-  # just runs it.
+  # so a missing or misnamed tag is an error instead of a silent build. Build
+  # with --platform linux/amd64 if the host is x86_64 and you build on ARM.
   api:
     image: ${FIRECRAWL_IMAGE:-firecrawl-lite/api:local}
     build: apps/api
