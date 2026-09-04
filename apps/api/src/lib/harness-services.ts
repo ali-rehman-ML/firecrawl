@@ -131,3 +131,66 @@ function disabledReason(
       return null;
   }
 }
+
+/**
+ * Per-process V8 heap ceilings, parsed from `HARNESS_HEAP_MB` entries shaped
+ * `service=MB` (e.g. `api=448,nuq-worker=288`).
+ *
+ * A single global `NODE_OPTIONS=--max-old-space-size=N` is the wrong shape for
+ * this stack: the api process holds every in-flight request and needs the most
+ * headroom, while the queue worker is nearly idle. Sizing them together either
+ * starves api under concurrent requests -- it aborts with "Reached heap limit",
+ * taking the whole harness down with it -- or wastes the budget on processes
+ * that will never use it.
+ *
+ * @throws {InvalidHarnessServiceError} on an unknown service name.
+ */
+export function parseHarnessHeapLimits(
+  entries?: string[],
+): Map<HarnessService, number> {
+  const limits = new Map<HarnessService, number>();
+  for (const entry of entries ?? []) {
+    const trimmed = entry.trim();
+    if (trimmed === "") continue;
+
+    const separator = trimmed.lastIndexOf("=");
+    if (separator === -1) {
+      throw new Error(
+        `Malformed HARNESS_HEAP_MB entry ${JSON.stringify(entry)}; expected "service=MB"`,
+      );
+    }
+
+    const name = trimmed.slice(0, separator).trim();
+    const rawMb = trimmed.slice(separator + 1).trim();
+    if (!isHarnessService(name)) throw new InvalidHarnessServiceError(name);
+
+    const mb = Number(rawMb);
+    if (!Number.isInteger(mb) || mb <= 0) {
+      throw new Error(
+        `Invalid heap size ${JSON.stringify(rawMb)} for ${name} in HARNESS_HEAP_MB; expected a positive integer of megabytes`,
+      );
+    }
+
+    limits.set(name, mb);
+  }
+  return limits;
+}
+
+/**
+ * Builds the child's NODE_OPTIONS, replacing any inherited
+ * `--max-old-space-size` rather than appending a second one. V8 does take the
+ * last occurrence, but leaving both in makes `ps` output actively misleading
+ * about which limit is in force.
+ */
+export function withHeapLimit(
+  nodeOptions: string | undefined,
+  mb: number | undefined,
+): string | undefined {
+  if (mb === undefined) return nodeOptions;
+
+  const kept = (nodeOptions ?? "")
+    .split(/\s+/)
+    .filter(token => token !== "" && !token.startsWith("--max-old-space-size"));
+
+  return [...kept, `--max-old-space-size=${mb}`].join(" ");
+}

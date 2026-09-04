@@ -105,13 +105,20 @@ services:
       # box with something you care about more.
       MAX_RAM: ${MAX_RAM:-0.95}
       MAX_CPU: ${MAX_CPU:-0.95}
-      # Sized so the heaps fit the container: HARNESS_SERVICES starts three
-      # Node processes plus the harness, and each carries ~80 MB of non-heap
-      # (binary, native modules, buffers) on top of its heap. Left at V8's
-      # default they each size off total host RAM and collectively overcommit
-      # the cgroup. Keep roughly API_MEM_LIMIT/4 - 80; raise both together if
-      # large pages hit heap OOM.
+      # Fallback for anything not named in HARNESS_HEAP_MB. Left at V8's
+      # default, each process sizes its heap off total host RAM and they
+      # collectively overcommit the cgroup.
       NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=256}
+      # Per-process heap ceilings. These are NOT interchangeable: the api
+      # process holds every in-flight request, so concurrent clients land on
+      # its heap, while the queue worker is nearly idle. Sizing them equally
+      # starved api -- five concurrent /v1/scrape calls aborted it with
+      # "FATAL ERROR: Reached heap limit", and because the harness treats a
+      # dead child as fatal that took the whole stack down and refused
+      # connections until Docker restarted it.
+      #
+      # Budget: heaps + ~70MB non-heap each + ~50MB harness <= API_MEM_LIMIT.
+      HARNESS_HEAP_MB: ${HARNESS_HEAP_MB:-api=448,worker=128,nuq-worker=288}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL}
@@ -143,8 +150,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cpus: 1.5
-    mem_limit: ${API_MEM_LIMIT:-1024m}
-    memswap_limit: ${API_MEMSWAP_LIMIT:-2048m}
+    mem_limit: ${API_MEM_LIMIT:-1152m}
+    memswap_limit: ${API_MEMSWAP_LIMIT:-2304m}
     logging: *logging
 
   # Chromium is the single largest consumer here; budget a few hundred MB even
@@ -163,10 +170,15 @@ services:
       PROXY_USERNAME: ${PROXY_USERNAME}
       PROXY_PASSWORD: ${PROXY_PASSWORD}
       ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS}
-      # Images and media are discarded during conversion to markdown anyway,
-      # so blocking them buys memory and bandwidth for free. Set to False if
-      # you need screenshots to look right.
-      BLOCK_MEDIA: ${BLOCK_MEDIA:-True}
+      # Off by default, despite the bandwidth it costs. Blocking media makes
+      # the page's `load` event fire earlier, and the Playwright service reads
+      # content on `load` (wait_after_load defaults to 0) -- which tightens the
+      # race against client-side hydration. Measured on a JS-hydrated SPA with
+      # a cold browser cache: True returned 46 characters on the first scrape
+      # and 7378 on every one after; False returned 7378 every time. A silent
+      # near-empty 200 is a worse failure than the memory it saves. Set True
+      # only if you scrape static pages and need the bandwidth back.
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-False}
       # One page at a time, to match NUQ_WORKER_COUNT. Each extra concurrent
       # page is roughly another 80-150 MB.
       MAX_CONCURRENT_PAGES: ${MAX_CONCURRENT_PAGES:-1}

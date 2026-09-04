@@ -312,6 +312,12 @@ const configSchema = z.object({
   // current configuration supports; narrowing it is how a small host runs
   // scraping without paying for a Node heap per unused worker.
   HARNESS_SERVICES: delimitedList(",").optional(),
+  // Per-process V8 heap ceilings as `service=MB` pairs, e.g.
+  // "api=448,nuq-worker=288". The api process holds every in-flight request
+  // and needs far more headroom than the queue worker, so a single global
+  // NODE_OPTIONS either starves it or wastes the budget. Unset inherits
+  // NODE_OPTIONS unchanged.
+  HARNESS_HEAP_MB: delimitedList(",").optional(),
 
   // Job & Lock Management
   JOB_LOCK_EXTEND_INTERVAL: z.coerce.number().default(10000),

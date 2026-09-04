@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   HARNESS_SERVICES,
   InvalidHarnessServiceError,
+  parseHarnessHeapLimits,
   selectHarnessServices,
+  withHeapLimit,
 } from "./harness-services";
 
 const RABBIT = "amqp://rabbitmq:5672";
@@ -130,5 +132,59 @@ describe("selectHarnessServices", () => {
         selectHarnessServices({ requested: ["api", "nuq-workers"] }),
       ).toThrow(InvalidHarnessServiceError);
     });
+  });
+});
+
+describe("parseHarnessHeapLimits", () => {
+  it("parses per-service megabyte ceilings", () => {
+    const limits = parseHarnessHeapLimits(["api=448", "nuq-worker=288"]);
+
+    expect(limits.get("api")).toBe(448);
+    expect(limits.get("nuq-worker")).toBe(288);
+    expect(limits.get("worker")).toBeUndefined();
+  });
+
+  it("treats unset and empty entries as no limits", () => {
+    expect(parseHarnessHeapLimits().size).toBe(0);
+    expect(parseHarnessHeapLimits([""]).size).toBe(0);
+  });
+
+  it("rejects an unknown service rather than ignoring the entry", () => {
+    expect(() => parseHarnessHeapLimits(["ap=448"])).toThrow(
+      InvalidHarnessServiceError,
+    );
+  });
+
+  it.each(["api", "api=", "api=0", "api=-1", "api=448.5", "api=lots"])(
+    "rejects malformed entry %j",
+    entry => {
+      expect(() => parseHarnessHeapLimits([entry])).toThrow();
+    },
+  );
+});
+
+describe("withHeapLimit", () => {
+  it("leaves NODE_OPTIONS alone when the service has no limit", () => {
+    expect(withHeapLimit("--enable-source-maps", undefined)).toBe(
+      "--enable-source-maps",
+    );
+    expect(withHeapLimit(undefined, undefined)).toBeUndefined();
+  });
+
+  // V8 honours the last occurrence, but two conflicting flags in `ps` output
+  // misrepresent which limit is actually in force.
+  it("replaces an inherited limit instead of appending a second one", () => {
+    const result = withHeapLimit(
+      "--max-old-space-size=256 --enable-source-maps",
+      448,
+    );
+
+    expect(result).toBe("--enable-source-maps --max-old-space-size=448");
+    expect(result!.match(/--max-old-space-size/g)).toHaveLength(1);
+  });
+
+  it("sets the limit when nothing was inherited", () => {
+    expect(withHeapLimit(undefined, 288)).toBe("--max-old-space-size=288");
+    expect(withHeapLimit("", 288)).toBe("--max-old-space-size=288");
   });
 });

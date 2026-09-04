@@ -5,7 +5,9 @@ import * as net from "net";
 import { basename, join } from "path";
 import { HTML_TO_MARKDOWN_PATH } from "./natives";
 import {
+  parseHarnessHeapLimits,
   selectHarnessServices,
+  withHeapLimit,
   type HarnessService,
 } from "./lib/harness-services";
 
@@ -847,6 +849,21 @@ async function startServices(command?: string[]): Promise<Services> {
   const isDocker = process.argv[2] === "--start-docker";
   const runs = (service: HarnessService) => enabled.has(service);
 
+  const heapLimits = parseHarnessHeapLimits(config.HARNESS_HEAP_MB);
+  // Each child gets its own heap ceiling; anything unlisted keeps the
+  // inherited NODE_OPTIONS.
+  const heapEnv = (service: HarnessService): Record<string, string> => {
+    const nodeOptions = withHeapLimit(
+      process.env.NODE_OPTIONS,
+      heapLimits.get(service),
+    );
+    return nodeOptions === undefined ? {} : { NODE_OPTIONS: nodeOptions };
+  };
+
+  for (const [service, mb] of heapLimits) {
+    if (runs(service)) logger.info(`${service} heap limit: ${mb}MB`);
+  }
+
   const api = runs("api")
     ? execForward(
         "api",
@@ -854,6 +871,7 @@ async function startServices(command?: string[]): Promise<Services> {
         {
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "api",
+          ...heapEnv("api"),
         },
       )
     : undefined;
@@ -868,6 +886,7 @@ async function startServices(command?: string[]): Promise<Services> {
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "worker",
           WORKER_PORT: String(WORKER_PORT),
+          ...heapEnv("worker"),
         },
       )
     : undefined;
@@ -882,6 +901,7 @@ async function startServices(command?: string[]): Promise<Services> {
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "extract-worker",
           EXTRACT_WORKER_PORT: String(EXTRACT_WORKER_PORT),
+          ...heapEnv("extract-worker"),
         },
       )
     : undefined;
@@ -900,6 +920,7 @@ async function startServices(command?: string[]): Promise<Services> {
             NUQ_WORKER_PORT: String(NUQ_WORKER_START_PORT + i),
             NUQ_REDUCE_NOISE: "true",
             NUQ_POD_NAME: `${nuqWorkerName}-${i}`,
+            ...heapEnv("nuq-worker"),
           },
         ),
       )
@@ -916,6 +937,7 @@ async function startServices(command?: string[]): Promise<Services> {
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "nuq-prefetch-worker-0",
           NUQ_PREFETCH_REPLICAS: String(1),
+          ...heapEnv("nuq-prefetch-worker"),
         },
       )
     : undefined;
@@ -930,6 +952,7 @@ async function startServices(command?: string[]): Promise<Services> {
           NUQ_RECONCILER_WORKER_PORT: String(NUQ_RECONCILER_WORKER_PORT),
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "nuq-reconciler-worker-0",
+          ...heapEnv("nuq-reconciler-worker"),
         },
       )
     : undefined;
@@ -943,6 +966,7 @@ async function startServices(command?: string[]): Promise<Services> {
         {
           NUQ_REDUCE_NOISE: "true",
           NUQ_POD_NAME: "index-worker",
+          ...heapEnv("index-worker"),
         },
       )
     : undefined;
