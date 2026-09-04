@@ -168,6 +168,17 @@ The other levers, in rough order of effect:
   `api,nuq-worker` frees ~350 MB and gives up crawl completion.
 - `MAX_CONCURRENT_PAGES` should track `NUQ_WORKER_COUNT`; extra pages cost
   memory nothing is there to use.
+- **Client concurrency should track `NUQ_WORKER_COUNT` too.** `/v1/scrape` is
+  synchronous with a 30s default timeout, so requests beyond the worker count
+  queue and the tail of a parallel batch times out with `408` while the stack
+  is perfectly healthy. Measured with one worker and 10 URLs: `xargs -P5` gave
+  9×200 and one 408; `xargs -P2` gave 10×200. For larger lists use
+  `/v1/batch/scrape`, which queues server-side rather than holding a connection
+  per URL.
+- `HARNESS_HEAP_MB` will not accept a process heap below 256MB. They all load
+  the same dependency tree before doing any work, so 128MB aborts during
+  startup, and the harness treats a dead child as fatal — a container restart
+  loop rather than a readable error. It now refuses to start instead.
 - Removing `playwright-service` and setting `PLAYWRIGHT_MICROSERVICE_URL=`
   (empty, not absent) frees its ~275 MB and falls back to plain fetch: no JS
   rendering, screenshots, or actions.

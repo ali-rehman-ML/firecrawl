@@ -145,6 +145,19 @@ function disabledReason(
  *
  * @throws {InvalidHarnessServiceError} on an unknown service name.
  */
+/**
+ * Smallest heap a harness process can be given.
+ *
+ * Every one of these processes loads the same large dependency tree before it
+ * does any work, so the floor is set by module loading, not by workload. A
+ * queue worker given 128MB aborted 9.8s into startup with "Reached heap limit"
+ * at ~131MB -- and because the harness treats a dead child as fatal, that is a
+ * container restart loop rather than a visible error. 256MB is the smallest
+ * value observed to boot all three processes. Rejecting anything lower turns a
+ * crash loop into a startup message that names the cause.
+ */
+export const MIN_HARNESS_HEAP_MB = 256;
+
 export function parseHarnessHeapLimits(
   entries?: string[],
 ): Map<HarnessService, number> {
@@ -168,6 +181,12 @@ export function parseHarnessHeapLimits(
     if (!Number.isInteger(mb) || mb <= 0) {
       throw new Error(
         `Invalid heap size ${JSON.stringify(rawMb)} for ${name} in HARNESS_HEAP_MB; expected a positive integer of megabytes`,
+      );
+    }
+    if (mb < MIN_HARNESS_HEAP_MB) {
+      throw new Error(
+        `Heap size ${mb}MB for ${name} in HARNESS_HEAP_MB is below the ${MIN_HARNESS_HEAP_MB}MB minimum. ` +
+          `Module loading alone needs ~130MB, so a smaller heap aborts during startup and the container restart-loops.`,
       );
     }
 

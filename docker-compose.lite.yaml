@@ -117,8 +117,14 @@ services:
       # dead child as fatal that took the whole stack down and refused
       # connections until Docker restarted it.
       #
+      # No process can go below 256MB: they all load the same dependency tree
+      # before doing any work, and 128MB aborted the queue worker 9.8s into
+      # startup -- a container restart loop, not a readable error. The harness
+      # now refuses to start rather than loop.
+      #
       # Budget: heaps + ~70MB non-heap each + ~50MB harness <= API_MEM_LIMIT.
-      HARNESS_HEAP_MB: ${HARNESS_HEAP_MB:-api=448,worker=128,nuq-worker=288}
+      # These defaults total ~1250MB and do lean on swap on a 2GB host.
+      HARNESS_HEAP_MB: ${HARNESS_HEAP_MB:-api=448,worker=256,nuq-worker=288}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL}
@@ -150,8 +156,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cpus: 1.5
-    mem_limit: ${API_MEM_LIMIT:-1152m}
-    memswap_limit: ${API_MEMSWAP_LIMIT:-2304m}
+    mem_limit: ${API_MEM_LIMIT:-1280m}
+    memswap_limit: ${API_MEMSWAP_LIMIT:-2560m}
     logging: *logging
 
   # Chromium is the single largest consumer here; budget a few hundred MB even

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   HARNESS_SERVICES,
   InvalidHarnessServiceError,
+  MIN_HARNESS_HEAP_MB,
   parseHarnessHeapLimits,
   selectHarnessServices,
   withHeapLimit,
@@ -161,6 +162,21 @@ describe("parseHarnessHeapLimits", () => {
       expect(() => parseHarnessHeapLimits([entry])).toThrow();
     },
   );
+
+  // A heap too small to load the dependency tree aborts during startup, and
+  // the harness turns that into a container restart loop rather than an error
+  // anyone can read. Fail at parse time instead.
+  it("rejects a heap below the startup floor", () => {
+    expect(() => parseHarnessHeapLimits(["worker=128"])).toThrow(
+      /below the 256MB minimum/,
+    );
+  });
+
+  it("accepts exactly the floor", () => {
+    expect(
+      parseHarnessHeapLimits([`worker=${MIN_HARNESS_HEAP_MB}`]).get("worker"),
+    ).toBe(MIN_HARNESS_HEAP_MB);
+  });
 });
 
 describe("withHeapLimit", () => {
